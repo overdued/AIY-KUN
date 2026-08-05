@@ -1,0 +1,16 @@
+#!/bin/sh
+# 自动加载机器人环境并运行 wander_avoid_wide.py
+# 用法（无需手动 source robot-env.sh）：
+#   cd /data/robot-host
+#   ./player/wander_avoid_wide
+#   ./player/wander_avoid_wide --turn-angle-deg 70 --angular-speed 0.60
+
+ROOT="${ROBOT_HOST_ROOT:-/data/robot-host}"
+if [ -f "$ROOT/robot-env.sh" ]; then
+    . "$ROOT/robot-env.sh"
+else
+    echo "ERROR: robot-env.sh not found at $ROOT/robot-env.sh" >&2
+    exit 1
+fi
+
+exec "$ROOT/bin/python3" "$ROOT/player/wander_avoid_wide.py" "$@"
