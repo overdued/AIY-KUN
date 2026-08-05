@@ -1,84 +1,142 @@
-# Kaihong Robot Pick-and-Stack
+# Kaihong Robot Lidar SLAM Mapping
 
-Kaihong 4.1 小车的机械臂叠块与放置任务。机器人通过机械臂上的 RGB 相机(icspring)识别彩色方块,自动完成**抓取 → 叠放 → 按原位放回**的完整流程。
+深开鸿（Kaihong）赛道 AIY 黑客松 —— 基于激光雷达的场景建图（SLAM）模块。
+服务于**避障 / 导航**场景：让小车在自己的工作环境中自动建立二维栅格地图，供后续导航与避障使用。
 
 ## 功能
 
-- **颜色识别**:通过 HSV 阈值实时检测蓝、绿、粉红三种颜色的方块
-- **动态对准**:机械臂 ID1 匀速转动扫描 + 小步闭环,把方块精确对准到画面中心
-- **抓取**:下爪 → 夹爪闭合 → 抬升,支持地面高度和叠放高度两种下爪深度
-- **叠放**:按标定高度把方块叠到目标方块上方(蓝叠绿、绿放粉红底座)
-- **放回**:按叠放时的高度抓取,放回各自的初始位置
+- **激光雷达驱动**：启动 RPLIDAR A1（CH341 串口适配器），发布 360° `/scan`
+- **SLAM 建图**：gmapping 融合 `/scan` + `/odom` 实时构建 `/map` 二维占据栅格地图
+- **键盘遥操作**：`w/a/s/d` 遥控小车在场景内行驶建图（发布到 `/cmd_vel`）
+- **地图保存**：`map_server map_saver` 导出 `.pgm` + `.yaml`
+- **RGB 视觉检测**（辅助/预留）：HSV 多段阈值检测彩色物体，反投影估计 3D 位置
 
-## 任务流程
+## 硬件 / 软件
+
+| 项 | 说明 |
+| --- | --- |
+| 小车 | M-Robots Board-3588S（OpenHarmony 4.1, M-Robots OS 4.1） |
+| 激光雷达 | RPLIDAR A1（USB 串口 CH341, `1a86:7523`, `/dev/ttyUSB0`） |
+| 底盘 | STM32 底盘控制器 `/dev/ttyCH343USB0`，接收 `/cmd_vel` |
+| ROS | ROS1 noetic，master 在板端 `http://<wlan0-ip>:11311` |
+| SLAM | `gmapping` + `map_server`（已在板端 `/data/local/release` 安装） |
+| 其他 | 板端 Python 3.12（`/data/robot-host/bin/python3`，无 OpenCV，视觉需在容器内跑） |
+
+## 目录结构
 
 ```
-[1] 抓绿色        -> 放到粉红底座上
-[2] 抓蓝色        -> 叠到绿色上(更高)
-[3] 抓蓝色(叠放处) -> 放回蓝色原位
-[4] 抓绿色(叠放处) -> 放回绿色原位
+.
+├── README.md                    本说明
+├── navigation/
+│   ├── teleop_keyboard.py       键盘遥操作（发布 /cmd_vel）
+│   ├── final_map.png            最终建图结果（PNG 预览）
+│   └── partial_run_map.png      半程建图（过程参考）
+├── vision/
+│   ├── detect_objects.py        RGB-D 物体检测节点（容器内运行）
+│   └── color_ranges.json        HSV 颜色阈值配置
+└── pick_place_stack.py          （master 分支的机械臂抓取堆叠，与本分支无关）
 ```
 
-## 硬件依赖
+## 建图流程
 
-- Kaihong 4.1 小车(M-Robots OS, OpenHarmony 4.1)
-- 机械臂(舵机 ID1-5 + 夹爪 ID10)
-- 机械臂 RGB 相机(icspring, UVC `/dev/video20`)
-- ROS 1 noetic,机械臂栈 host 模式
-
-## 安装
-
-把 `pick_place_stack.py` 放到小车板端:
-
-```sh
-scp -P 2223 pick_place_stack.py root@<小车IP>:/data/robot-host/student/mission/
-```
-
-## 使用
-
-SSH 连接小车后:
+SSH 连接小车（端口 2223，账号 root，密钥登录）：
 
 ```sh
 ssh root@<小车IP> -p 2223
 cd /data/robot-host
-
-# 1. 确认机械臂栈就绪
-./status-host-arm-4.1.sh          # 应显示 host_arm=READY
-
-# 2. 启动机械臂相机节点(如未运行)
-docker exec -d rk3588s-vision bash -lc \
-  'source /opt/ros/noetic/setup.bash; exec python3 /tmp/icspring_node.py >/tmp/icspring.log 2>&1'
-
-# 3. 摆好方块: 粉红底座、绿色、蓝色 各就各位
-
-# 4. 运行叠块任务
-cd /data/robot-host
-. ./robot-env.sh
-/bin/run python3 student/mission/pick_place_stack.py
 ```
 
-## 关键标定参数
+### 1. 启动底盘栈（roscore + chassis + odom）
 
-| 参数 | 值 | 说明 |
-| --- | --- | --- |
-| `GRASP` | (140, 325, 365) | 地面抓取下爪高度 (ID2,ID3,ID4) |
-| `PLACE` | (180, 300, 330) | 放置高度(比抓取高约 5-7cm) |
-| `STACK` | (250, 275, 305) | 叠放高度(比 PLACE 再高约 5cm) |
-| `GRIPPER_OPEN` | 200 | 夹爪全张 |
-| `GRIPPER_CLOSE` | 620 | 夹爪全闭 |
+```sh
+sh /data/robot-host/start-host-chassis.sh
+# 期望输出: host chassis started / ROS_MASTER_URI=http://<ip>:11311
+```
 
-> 这些值因小车机械臂安装而异,首次使用请现场校准。
+### 2. 启动激光雷达
 
-## 颜色 HSV 阈值
+```sh
+sh /data/robot-host/start-lidar-4.1.sh
+# 期望输出: lidar=RUNNING SCAN=READY
+sh /data/robot-host/healthcheck-lidar-4.1.sh   # 全 PASS 即正常
+```
 
-| 颜色 | HSV 范围 |
+### 3. 启动 SLAM
+
+```sh
+sh /data/robot-host/start-slam-4.1.sh
+# 期望输出: slam=RUNNING mode=host
+```
+
+SLAM launch（`/data/robot-host/navigation_runtime/launch/slam.launch`）要点：
+
+- 静态变换 `base_to_laser`：`x=0 y=0 z=0.20`（默认值，实际安装高度需标定）
+- gmapping：`map_update_interval=2.0`、`particles=30`、`delta=0.05`（5cm/像素）
+- 地图范围默认 ±10m，建图会随小车移动自动扩展
+
+### 4. 遥控小车建图
+
+在**电脑**上新开终端（需要 TTY，交互式按键）：
+
+```sh
+ssh aiy-car -t "cd /data/robot-host && . ./robot-env.sh && bin/python3 teleop_keyboard.py"
+```
+
+| 按键 | 动作 |
 | --- | --- |
-| 绿 | (35,40,40)-(90,255,255) |
-| 蓝 | (85,40,40)-(140,255,255) |
-| 粉红 | (140,60,40)-(180,255,255) |
+| `w` | 前进 |
+| `s` | 后退 |
+| `a` | 左转 |
+| `d` | 右转 |
+| 其他 | 停止 |
+| `Ctrl-C` | 退出（自动停车） |
 
-> 粉色阈值 S>60 用于排除白色背景干扰。
+### 5. 保存地图
 
-## 许可证
+```sh
+# 注意: 此板端环境 rosrun 找不到 map_saver，需直接调用实际路径
+. /data/robot-host/robot-env.sh
+/data/local/release/usr/lib/map_server/map_saver -f /data/robot/maps/final_map
+# 生成 /data/robot/maps/final_map.pgm + .yaml
+```
+
+## 建图质量要点（实测经验）
+
+底盘里程计为**开环**（`cmd_vel_odom_node.py` 积分指令，无编码器反馈），转弯会累积漂移。
+为保证地图质量：
+
+- **慢速平稳**行驶（遥控已限速 0.15 m/s）
+- **少转弯、缓转弯**：每次转角 ≤45°，转完稍停让 gmapping 激光匹配稳定
+- **多往返覆盖**：直线来回多走几趟，让扫描匹配反复校正
+- **控制在场景范围内**：雷达量程 12m，会扫到周边房间的墙，不要离场景太远
+
+## 已知问题 / 排查
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 雷达 `SCAN=NO_DATA`，日志报 `no valid RPLIDAR measurement nodes` | 电机未转动。**重新插拔雷达 USB 线**（硬复位），再 `start-lidar-4.1.sh` |
+| 板端 `import cv2` 段错误 | 板端宿主 Python 无 OpenCV，视觉检测需在 `rk3588s-vision` 容器内运行 |
+| `rosrun map_server map_saver` 找不到 | 发布版布局，直接调 `/data/local/release/usr/lib/map_server/map_saver` |
+| 换热点后 SSH 连不上 | 小车 IP 变化，重新扫描网段 2223 端口并更新 SSH config |
+| 地图漂移/噪点 | 开环 odom 所致，见「建图质量要点」；必要时降低 `angularUpdate` |
+
+## 视觉检测（可选，容器内）
+
+`vision/detect_objects.py` 在 `rk3588s-vision` 容器内运行，检测彩色物体（球/正方体/长方体），
+输出颜色、形状、相机系 3D 坐标与物理尺寸，发布到 `/student/grasp/objects`。
+
+```sh
+# 板端持久目录
+scp -P 2223 vision/detect_objects.py vision/color_ranges.json root@<小车IP>:/data/robot-host/vision/
+# 拷入容器（容器重启会丢，需重拷）
+docker cp /data/robot-host/vision/detect_objects.py rk3588s-vision:/data/vision/
+docker cp /data/robot-host/vision/color_ranges.json rk3588s-vision:/data/vision/
+# 容器内单帧测试
+docker exec rk3588s-vision bash -lc \
+  'source /opt/ros/noetic/setup.bash; source /vision_ws/devel/setup.bash; \
+   python3 /data/vision/detect_objects.py --config /data/vision/color_ranges.json --once --output-dir /tmp'
+```
+
+## License
 
 MIT
